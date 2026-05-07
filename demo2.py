@@ -1,11 +1,10 @@
 import os
 
-from fastapi import FastAPI
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI
-from langserve import add_routes
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_PROJECT"] = "LangChainDemo"
@@ -18,46 +17,64 @@ model = ChatOpenAI(
     base_url='https://generativelanguage.googleapis.com/v1beta/openai/',
 )
 
-# 2. 准备prompt
-msg = [
-    SystemMessage(content='请将以下的内容翻译成意大利语'),
-    HumanMessage(content='你好, 请问你要去哪里? ')
-]
-
-result = model.invoke(msg)
-# print(result)
-
-# 简单的解析响应数据
-# 3. 创建返回的数据解析器
-parser = StrOutputParser()
-# print(parser.invoke(result))
-
 # 定义提示模板
 prompt_template = ChatPromptTemplate.from_messages([
-    ('system', '请将下面的内容翻译成{language}'),
-    ('user', '{text}')
+    ('system', '你是一个非常乐于助人的助手. 用{language}尽你所能回答所有问题. '),
+    MessagesPlaceholder(variable_name='my_msg')
 ])
 
-
 # 4. 得到链
-chain = prompt_template | model | parser
+chain = prompt_template | model
 
-# 5. 直接使用chain来调用
-# print(chain.invoke(msg))
-# print(chain.invoke({'language': 'English', 'text': '我下午还有一节课, 不能去打球了. '}))
+# 保存聊天的历史记录
+# 所有用户的聊天记录都保存到这个store. key: sessionId, value: 历史聊天记录对象
+store = {}
 
-# 把我们的程序部署成服务
-# 创建fastAPI的应用
-app = FastAPI(title='我的LangChain服务', version='V1.0', description='使用LangChain翻译任何语句的服务')
 
-add_routes(
-    app,
+# 此函数预期将接收一个session_id并返回一个消息历史记录对象.
+def get_session_history(session_id: str):
+    if session_id not in store:
+        store[session_id] = ChatMessageHistory()
+    return store[session_id]
+
+
+do_message = RunnableWithMessageHistory(
     chain,
-    path='/chainDemo',
+    get_session_history,
+    input_messages_key='my_msg'  # 每次聊天的时候发送msg的key
 )
 
-if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run(app, host='localhost', port=8000)
+# 给当前会话定义一个session_id
+config = {'configurable': {'session_id': 'zs123'}}
 
+# 第一轮
+resp = do_message.invoke(
+    {
+        'my_msg': [HumanMessage(content='你好啊! 我是LaoXiao')],
+        'language': '中文'
+    },
+    config=config
+)
+print(resp.content)
 
+# 第二轮
+resp2 = do_message.invoke(
+    {
+        'my_msg': [HumanMessage(content='请问: 我的名字是什么?')],
+        'language': '中文'
+    },
+    config=config
+)
+print(resp2.content)
+
+# 第三轮
+# 返回的数据是流式的
+for resp in do_message.stream(
+        {
+            'my_msg': [HumanMessage(content='请给我讲一个笑话?')],
+            'language': 'English'
+        },
+        config=config
+):
+    # 每一次resp响应都是一个token
+    print(resp.content, end='-')
